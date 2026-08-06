@@ -38,44 +38,14 @@ def locate_json_error(raw_str, error):
     return "\n".join(snippet_lines)
 
 
-def validate_schema_object(obj, path="root"):
-    """Recursively audits parsed JSON-LD objects for essential Schema.org properties."""
-    warnings = []
-    
-    if isinstance(obj, dict):
-        if path == "root" and "@context" not in obj:
-            warnings.append("Missing '@context' property (expected 'https://schema.org').")
-        elif path == "root" and "schema.org" not in str(obj.get("@context", "")).lower():
-            warnings.append(f"Invalid '@context' value: '{obj.get('@context')}'. Should reference schema.org.")
-
-        if "@type" not in obj:
-            warnings.append(f"Missing '@type' property at node path: '{path}'.")
-        
-        if "@graph" in obj and isinstance(obj["@graph"], list):
-            for idx, item in enumerate(obj["@graph"]):
-                warnings.extend(validate_schema_object(item, path=f"@graph[{idx}]"))
-                
-        for key, val in obj.items():
-            if key not in ("@context", "@graph"):
-                if isinstance(val, (dict, list)):
-                    warnings.extend(validate_schema_object(val, path=f"{path}.{key}"))
-                    
-    elif isinstance(obj, list):
-        for idx, item in enumerate(obj):
-            warnings.extend(validate_schema_object(item, path=f"{path}[{idx}]"))
-            
-    return warnings
-
-
 def inspect_page_structured_data(page, target_url):
-    """Navigates to URL, extracts all JSON-LD script blocks, and audits syntax & schema rules."""
+    """Navigates to URL, extracts JSON-LD script tags, and audits strictly for JSON syntax errors."""
     report = {
         "url": target_url,
         "status_code": "Unknown",
         "total_scripts": 0,
         "has_errors": False,
         "syntax_errors": [],
-        "warnings": [],
         "valid_blocks": []
     }
 
@@ -95,7 +65,12 @@ def inspect_page_structured_data(page, target_url):
         report["total_scripts"] = len(script_contents)
 
         if len(script_contents) == 0:
-            report["warnings"].append("No <script type='application/ld+json'> tags found on page.")
+            report["has_errors"] = True
+            report["syntax_errors"].append({
+                "block_index": 0,
+                "error_message": "No <script type='application/ld+json'> tags found on this page.",
+                "snippet": ""
+            })
 
         for item in script_contents:
             raw_json = item["content"].strip()
@@ -104,15 +79,15 @@ def inspect_page_structured_data(page, target_url):
             if not raw_json:
                 report["syntax_errors"].append({
                     "block_index": block_idx,
-                    "error_message": "Empty JSON-LD script tag.",
+                    "error_message": "Empty JSON-LD script tag found.",
                     "snippet": ""
                 })
                 report["has_errors"] = True
                 continue
 
+            # Strict JSON syntax validation
             try:
                 parsed_data = json.loads(raw_json)
-                schema_warnings = validate_schema_object(parsed_data)
                 
                 schema_type = "Unknown"
                 if isinstance(parsed_data, dict):
@@ -123,12 +98,8 @@ def inspect_page_structured_data(page, target_url):
                 report["valid_blocks"].append({
                     "block_index": block_idx,
                     "type": schema_type,
-                    "warnings": schema_warnings,
                     "data": parsed_data
                 })
-
-                if schema_warnings:
-                    report["warnings"].extend([f"Block #{block_idx} ({schema_type}): {w}" for w in schema_warnings])
 
             except json.JSONDecodeError as err:
                 report["has_errors"] = True
@@ -176,7 +147,7 @@ def run_batch_audit(urls):
         page = context.new_page()
 
         for idx, target_url in enumerate(urls):
-            status_text.text(f"Auditing Structured Data ({idx + 1}/{total}): {target_url}")
+            status_text.text(f"Auditing JSON Syntax ({idx + 1}/{total}): {target_url}")
             progress_bar.progress((idx + 1) / total)
             
             report = inspect_page_structured_data(page, target_url)
@@ -190,9 +161,9 @@ def run_batch_audit(urls):
 
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="Structured Data Error Checker", layout="wide")
-st.title("🏷️ Structured Data & JSON-LD Error Checker")
-st.caption("Parses rendered page DOM via Chromium to detect JSON syntax errors, missing Schema.org properties, and broken script tags.")
+st.set_page_config(page_title="JSON-LD Syntax Error Checker", layout="wide")
+st.title("🏷️ JSON-LD Syntax Error Checker")
+st.caption("Parses rendered page DOM via Chromium to detect broken JSON syntax, malformed tags, and parse errors.")
 
 user_urls_input = st.text_area(
     "Paste URLs to Audit (One per line):",
@@ -200,26 +171,24 @@ user_urls_input = st.text_area(
     placeholder="https://example.com/product-1\nhttps://example.com/blog/article-1"
 )
 
-if st.button("Audit Structured Data", type="primary"):
+if st.button("Audit JSON Syntax", type="primary"):
     urls = [u.strip() for u in user_urls_input.splitlines() if u.strip()]
 
     if not urls:
         st.error("Please enter at least one URL to check.")
     else:
-        with st.spinner("Extracting and parsing JSON-LD scripts..."):
+        with st.spinner("Extracting and validating JSON-LD syntax..."):
             try:
                 results = run_batch_audit(urls)
 
                 total_pages = len(results)
                 pages_with_syntax_err = sum(1 for r in results if r["syntax_errors"])
-                pages_with_warnings = sum(1 for r in results if r["warnings"] and not r["syntax_errors"])
-                clean_pages = total_pages - pages_with_syntax_err - pages_with_warnings
+                clean_pages = total_pages - pages_with_syntax_err
 
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3 = st.columns(3)
                 c1.metric("Pages Audited", total_pages)
-                c2.metric("Syntax Errors", pages_with_syntax_err)
-                c3.metric("Schema Warnings", pages_with_warnings)
-                c4.metric("Valid Schema Pages", clean_pages)
+                c2.metric("Syntax Errors Found", pages_with_syntax_err)
+                c3.metric("Valid Syntax Pages", clean_pages)
 
                 st.markdown("---")
                 st.subheader("Summary Table")
@@ -230,8 +199,7 @@ if st.button("Audit Structured Data", type="primary"):
                         "HTTP Status": r["status_code"],
                         "JSON-LD Blocks": r["total_scripts"],
                         "Syntax Errors": len(r["syntax_errors"]),
-                        "Warnings": len(r["warnings"]),
-                        "Status": "🔴 Syntax Error" if r["syntax_errors"] else ("🟡 Warnings" if r["warnings"] else "🟢 Valid")
+                        "Status": "🔴 Syntax Error" if r["syntax_errors"] else "🟢 Valid Syntax"
                     }
                     for r in results
                 ])
@@ -240,7 +208,7 @@ if st.button("Audit Structured Data", type="primary"):
                 st.download_button(
                     "Download CSV Audit Report",
                     data=df_summary.to_csv(index=False),
-                    file_name="structured_data_audit.csv",
+                    file_name="json_syntax_audit.csv",
                     mime="text/csv"
                 )
 
@@ -248,7 +216,7 @@ if st.button("Audit Structured Data", type="primary"):
                 st.subheader("Detailed Diagnostic Breakdowns")
 
                 for r in results:
-                    badge = "🔴 SYNTAX ERROR" if r["syntax_errors"] else ("🟡 WARNINGS" if r["warnings"] else "🟢 VALID")
+                    badge = "🔴 SYNTAX ERROR" if r["syntax_errors"] else "🟢 VALID SYNTAX"
                     
                     with st.expander(f"{badge} — {r['url']} ({r['total_scripts']} JSON-LD blocks found)"):
                         if r["syntax_errors"]:
@@ -259,18 +227,11 @@ if st.button("Audit Structured Data", type="primary"):
                                     st.code(err["snippet"], language="text")
                                 st.divider()
 
-                        if r["warnings"]:
-                            st.warning("### ⚠️ Schema Vocabulary & Context Warnings")
-                            for warn in r["warnings"]:
-                                st.markdown(f"- {warn}")
-                            st.divider()
-
                         if r["valid_blocks"]:
-                            st.success("### ✅ Parsed JSON-LD Structures")
+                            st.success("### ✅ Valid JSON-LD Structures")
                             for block in r["valid_blocks"]:
                                 st.markdown(f"**Block #{block['block_index']} (@type: `{block['type']}`)**")
                                 st.json(block["data"])
 
             except Exception as err:
                 st.error(f"Execution Error: {err}")
-                st.info("If this is your first deploy after adding packages.txt, please Reboot your app from the Streamlit Cloud menu.")
