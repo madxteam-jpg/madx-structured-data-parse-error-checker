@@ -1,0 +1,1 @@
+# madx-structured-data-parse-error-checker
