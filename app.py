@@ -2,10 +2,16 @@ import subprocess
 import sys
 import time
 import json
+import io
+from datetime import datetime
 from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 from playwright.sync_api import sync_playwright
+
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend required for headless server environments
+import matplotlib.pyplot as plt
 
 # --- Streamlit Cloud Auto-Installation ---
 @st.cache_resource
@@ -36,6 +42,71 @@ def locate_json_error(raw_str, error):
             snippet_lines.append("   " + " " * (len(f"Line {idx + 1}: ") + col_no - 1) + "^")
             
     return "\n".join(snippet_lines)
+
+
+def generate_proof_image(results):
+    """Generates a styled PNG image summary card as downloadable proof of auditing."""
+    total = len(results)
+    syntax_errors = sum(1 for r in results if r["syntax_errors"])
+    clean_pages = total - syntax_errors
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    # Set up canvas height dynamically based on row count
+    fig, ax = plt.subplots(figsize=(10, max(4, len(results) * 0.5 + 2.5)), dpi=150)
+    ax.axis('off')
+
+    # Header & Timestamp
+    fig.text(0.05, 0.93, "JSON-LD Syntax Audit Proof", fontsize=18, fontweight='bold', color='#0F172A')
+    fig.text(0.05, 0.88, f"Verified On: {timestamp}", fontsize=9, color='#64748B')
+
+    # KPI Banner
+    banner_text = f"Total Pages: {total}  |  Syntax Errors: {syntax_errors}  |  Valid Pages: {clean_pages}"
+    fig.text(0.05, 0.81, banner_text, fontsize=11, fontweight='bold', color='#1E293B',
+             bbox=dict(boxstyle="round,pad=0.5", facecolor="#F1F5F9", edgecolor="#CBD5E1"))
+
+    # Table Formatting
+    table_data = [["Target URL", "HTTP", "Scripts", "Syntax Errors", "Status"]]
+    for r in results:
+        display_url = r["url"] if len(r["url"]) < 45 else r["url"][:42] + "..."
+        status_label = "Syntax Error" if r["syntax_errors"] else "Valid Syntax"
+        table_data.append([
+            display_url,
+            str(r["status_code"]),
+            str(r["total_scripts"]),
+            str(len(r["syntax_errors"])),
+            status_label
+        ])
+
+    table = ax.table(cellText=table_data, loc='center', cellLoc='left', colWidths=[0.48, 0.12, 0.12, 0.13, 0.15])
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.8)
+
+    # Cell Styling & Badges
+    for (row, col), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_facecolor('#0F172A')
+            cell.set_text_props(color='white', fontweight='bold')
+        else:
+            if col == 4:
+                status_val = table_data[row][4]
+                if status_val == "Syntax Error":
+                    cell.set_facecolor('#FEE2E2')
+                    cell.set_text_props(color='#991B1B', fontweight='bold')
+                else:
+                    cell.set_facecolor('#DCFCE7')
+                    cell.set_text_props(color='#166534', fontweight='bold')
+            else:
+                cell.set_facecolor('#FFFFFF' if row % 2 == 0 else '#F8FAFC')
+
+    plt.tight_layout()
+
+    # Save image to in-memory buffer
+    img_buffer = io.BytesIO()
+    plt.savefig(img_buffer, format='png', bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    img_buffer.seek(0)
+    return img_buffer
 
 
 def inspect_page_structured_data(page, target_url):
@@ -85,7 +156,6 @@ def inspect_page_structured_data(page, target_url):
                 report["has_errors"] = True
                 continue
 
-            # Strict JSON syntax validation
             try:
                 parsed_data = json.loads(raw_json)
                 
@@ -160,7 +230,7 @@ def run_batch_audit(urls):
     return results
 
 
-# --- Streamlit UI ---
+# --- Streamlit UI Layout ---
 st.set_page_config(page_title="JSON-LD Syntax Error Checker", layout="wide")
 st.title("🏷️ JSON-LD Syntax Error Checker")
 st.caption("Parses rendered page DOM via Chromium to detect broken JSON syntax, malformed tags, and parse errors.")
@@ -205,12 +275,25 @@ if st.button("Audit JSON Syntax", type="primary"):
                 ])
                 st.dataframe(df_summary, use_container_width=True)
 
-                st.download_button(
-                    "Download CSV Audit Report",
-                    data=df_summary.to_csv(index=False),
-                    file_name="json_syntax_audit.csv",
-                    mime="text/csv"
-                )
+                # --- Download Buttons (CSV + Proof Image) ---
+                proof_img_buf = generate_proof_image(results)
+                
+                btn_col1, btn_col2 = st.columns([1, 1])
+                with btn_col1:
+                    st.download_button(
+                        label="📷 Download Summary as Proof Image (PNG)",
+                        data=proof_img_buf,
+                        file_name=f"json_ld_audit_proof_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.png",
+                        mime="image/png",
+                        type="primary"
+                    )
+                with btn_col2:
+                    st.download_button(
+                        label="📄 Download CSV Audit Report",
+                        data=df_summary.to_csv(index=False),
+                        file_name="json_syntax_audit.csv",
+                        mime="text/csv"
+                    )
 
                 st.markdown("---")
                 st.subheader("Detailed Diagnostic Breakdowns")
