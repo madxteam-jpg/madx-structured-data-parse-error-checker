@@ -2,26 +2,25 @@ import subprocess
 import sys
 import time
 import json
-import re
 from urllib.parse import urlparse
 import pandas as pd
 import streamlit as st
 from playwright.sync_api import sync_playwright
 
-# --- Streamlit Cloud Playwright Setup ---
+# --- Streamlit Cloud Auto-Installation ---
 @st.cache_resource
 def setup_playwright():
-    """Installs Chromium binary on app startup for Streamlit Cloud compatibility."""
+    """Installs Chromium binary on app launch (OS dependencies handled by packages.txt)."""
     try:
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
     except Exception as e:
-        print(f"Playwright setup note: {e}")
+        print(f"Playwright installation warning: {e}")
 
 setup_playwright()
 
 
 def locate_json_error(raw_str, error):
-    """Pinpoints the line number, column, and exact character snippet where JSON parsing failed."""
+    """Pinpoints line number, column, and exact character snippet where JSON parsing failed."""
     lines = raw_str.splitlines()
     line_no = error.lineno
     col_no = error.colno
@@ -44,22 +43,18 @@ def validate_schema_object(obj, path="root"):
     warnings = []
     
     if isinstance(obj, dict):
-        # Check @context on root object
         if path == "root" and "@context" not in obj:
             warnings.append("Missing '@context' property (expected 'https://schema.org').")
         elif path == "root" and "schema.org" not in str(obj.get("@context", "")).lower():
             warnings.append(f"Invalid '@context' value: '{obj.get('@context')}'. Should reference schema.org.")
 
-        # Check @type
         if "@type" not in obj:
             warnings.append(f"Missing '@type' property at node path: '{path}'.")
         
-        # Check for @graph arrays or nested schemas
         if "@graph" in obj and isinstance(obj["@graph"], list):
             for idx, item in enumerate(obj["@graph"]):
                 warnings.extend(validate_schema_object(item, path=f"@graph[{idx}]"))
                 
-        # Audit nested objects
         for key, val in obj.items():
             if key not in ("@context", "@graph"):
                 if isinstance(val, (dict, list)):
@@ -86,10 +81,9 @@ def inspect_page_structured_data(page, target_url):
 
     try:
         response = page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
-        time.sleep(1.5)  # Allow DOM hydration
+        time.sleep(1.5)
         report["status_code"] = response.status if response else "Failed"
 
-        # Extract raw inner HTML of all <script type="application/ld+json"> tags
         script_contents = page.evaluate("""() => {
             const scripts = document.querySelectorAll('script[type="application/ld+json"]');
             return Array.from(scripts).map((s, idx) => ({
@@ -117,13 +111,9 @@ def inspect_page_structured_data(page, target_url):
                 continue
 
             try:
-                # 1. Attempt JSON Syntax Parsing
                 parsed_data = json.loads(raw_json)
-                
-                # 2. Schema Logic Audit
                 schema_warnings = validate_schema_object(parsed_data)
                 
-                # Derive schema @type for UI labeling
                 schema_type = "Unknown"
                 if isinstance(parsed_data, dict):
                     schema_type = parsed_data.get("@type", "Object/@graph")
@@ -176,8 +166,7 @@ def run_batch_audit(urls):
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--single-process"
+                "--disable-gpu"
             ]
         )
         context = browser.new_context(
@@ -200,7 +189,7 @@ def run_batch_audit(urls):
     return results
 
 
-# --- Streamlit UI Config ---
+# --- Streamlit UI ---
 st.set_page_config(page_title="Structured Data Error Checker", layout="wide")
 st.title("🏷️ Structured Data & JSON-LD Error Checker")
 st.caption("Parses rendered page DOM via Chromium to detect JSON syntax errors, missing Schema.org properties, and broken script tags.")
@@ -218,69 +207,70 @@ if st.button("Audit Structured Data", type="primary"):
         st.error("Please enter at least one URL to check.")
     else:
         with st.spinner("Extracting and parsing JSON-LD scripts..."):
-            results = run_batch_audit(urls)
+            try:
+                results = run_batch_audit(urls)
 
-        # Overview KPI Banner
-        total_pages = len(results)
-        pages_with_syntax_err = sum(1 for r in results if r["syntax_errors"])
-        pages_with_warnings = sum(1 for r in results if r["warnings"] and not r["syntax_errors"])
-        clean_pages = total_pages - pages_with_syntax_err - pages_with_warnings
+                total_pages = len(results)
+                pages_with_syntax_err = sum(1 for r in results if r["syntax_errors"])
+                pages_with_warnings = sum(1 for r in results if r["warnings"] and not r["syntax_errors"])
+                clean_pages = total_pages - pages_with_syntax_err - pages_with_warnings
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Pages Audited", total_pages)
-        c2.metric("Syntax Errors", pages_with_syntax_err)
-        c3.metric("Schema Warnings", pages_with_warnings)
-        c4.metric("Valid Schema Pages", clean_pages)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Pages Audited", total_pages)
+                c2.metric("Syntax Errors", pages_with_syntax_err)
+                c3.metric("Schema Warnings", pages_with_warnings)
+                c4.metric("Valid Schema Pages", clean_pages)
 
-        st.markdown("---")
-        st.subheader("Summary Table")
+                st.markdown("---")
+                st.subheader("Summary Table")
 
-        df_summary = pd.DataFrame([
-            {
-                "URL": r["url"],
-                "HTTP Status": r["status_code"],
-                "JSON-LD Blocks": r["total_scripts"],
-                "Syntax Errors": len(r["syntax_errors"]),
-                "Warnings": len(r["warnings"]),
-                "Status": "🔴 Syntax Error" if r["syntax_errors"] else ("🟡 Warnings" if r["warnings"] else "🟢 Valid")
-            }
-            for r in results
-        ])
-        st.dataframe(df_summary, use_container_width=True)
+                df_summary = pd.DataFrame([
+                    {
+                        "URL": r["url"],
+                        "HTTP Status": r["status_code"],
+                        "JSON-LD Blocks": r["total_scripts"],
+                        "Syntax Errors": len(r["syntax_errors"]),
+                        "Warnings": len(r["warnings"]),
+                        "Status": "🔴 Syntax Error" if r["syntax_errors"] else ("🟡 Warnings" if r["warnings"] else "🟢 Valid")
+                    }
+                    for r in results
+                ])
+                st.dataframe(df_summary, use_container_width=True)
 
-        st.download_button(
-            "Download CSV Audit Report",
-            data=df_summary.to_csv(index=False),
-            file_name="structured_data_audit.csv",
-            mime="text/csv"
-        )
+                st.download_button(
+                    "Download CSV Audit Report",
+                    data=df_summary.to_csv(index=False),
+                    file_name="structured_data_audit.csv",
+                    mime="text/csv"
+                )
 
-        st.markdown("---")
-        st.subheader("Detailed Diagnostic Breakdowns")
+                st.markdown("---")
+                st.subheader("Detailed Diagnostic Breakdowns")
 
-        for r in results:
-            badge = "🔴 SYNTAX ERROR" if r["syntax_errors"] else ("🟡 WARNINGS" if r["warnings"] else "🟢 VALID")
-            
-            with st.expander(f"{badge} — {r['url']} ({r['total_scripts']} JSON-LD blocks found)"):
-                # 1. Show Syntax Errors with Line/Col Cursor
-                if r["syntax_errors"]:
-                    st.error("### ❌ JSON Syntax Errors Detected")
-                    for err in r["syntax_errors"]:
-                        st.markdown(f"**Block #{err['block_index']} Error:** `{err['error_message']}`")
-                        if err["snippet"]:
-                            st.code(err["snippet"], language="text")
-                        st.divider()
+                for r in results:
+                    badge = "🔴 SYNTAX ERROR" if r["syntax_errors"] else ("🟡 WARNINGS" if r["warnings"] else "🟢 VALID")
+                    
+                    with st.expander(f"{badge} — {r['url']} ({r['total_scripts']} JSON-LD blocks found)"):
+                        if r["syntax_errors"]:
+                            st.error("### ❌ JSON Syntax Errors Detected")
+                            for err in r["syntax_errors"]:
+                                st.markdown(f"**Block #{err['block_index']} Error:** `{err['error_message']}`")
+                                if err["snippet"]:
+                                    st.code(err["snippet"], language="text")
+                                st.divider()
 
-                # 2. Show Schema Rule Warnings
-                if r["warnings"]:
-                    st.warning("### ⚠️ Schema Vocabulary & Context Warnings")
-                    for warn in r["warnings"]:
-                        st.markdown(f"- {warn}")
-                    st.divider()
+                        if r["warnings"]:
+                            st.warning("### ⚠️ Schema Vocabulary & Context Warnings")
+                            for warn in r["warnings"]:
+                                st.markdown(f"- {warn}")
+                            st.divider()
 
-                # 3. Show Successfully Parsed JSON-LD Blocks
-                if r["valid_blocks"]:
-                    st.success("### ✅ Parsed JSON-LD Structures")
-                    for block in r["valid_blocks"]:
-                        st.markdown(f"**Block #{block['block_index']} (@type: `{block['type']}`)**")
-                        st.json(block["data"])
+                        if r["valid_blocks"]:
+                            st.success("### ✅ Parsed JSON-LD Structures")
+                            for block in r["valid_blocks"]:
+                                st.markdown(f"**Block #{block['block_index']} (@type: `{block['type']}`)**")
+                                st.json(block["data"])
+
+            except Exception as err:
+                st.error(f"Execution Error: {err}")
+                st.info("If this is your first deploy after adding packages.txt, please Reboot your app from the Streamlit Cloud menu.")
