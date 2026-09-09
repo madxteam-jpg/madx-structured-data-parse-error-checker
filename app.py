@@ -13,16 +13,24 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend required for headless server environments
 import matplotlib.pyplot as plt
 
-# --- Streamlit Cloud Auto-Installation ---
+# --- Safe Playwright Initialization ---
 @st.cache_resource
-def setup_playwright():
-    """Installs Chromium binary on app launch (OS dependencies handled by packages.txt)."""
+def init_playwright_env():
+    """Ensures Playwright executables exist without blocking Streamlit startup."""
+    import os
+    # Force Playwright to use standard cache directory in Streamlit Cloud
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     try:
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-    except Exception as e:
-        print(f"Playwright installation warning: {e}")
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+    except subprocess.CalledProcessError as err:
+        st.error(f"Playwright browser installation failed: {err.stderr}")
 
-setup_playwright()
+init_playwright_env()
 
 
 def locate_json_error(raw_str, error):
