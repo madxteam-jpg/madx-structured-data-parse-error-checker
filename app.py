@@ -1,37 +1,19 @@
-import subprocess
-import sys
-import time
-import json
 import io
+import json
+import time
 from datetime import datetime
-from urllib.parse import urlparse
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 import streamlit as st
-from playwright.sync_api import sync_playwright
 
 import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend required for headless server environments
+matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 
-# --- Safe Playwright Initialization ---
-@st.cache_resource
-def init_playwright_env():
-    import os
-    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-    except subprocess.CalledProcessError as err:
-        st.error(f"Playwright installation failed: {err.stderr}")
-
-init_playwright_env()
 
 def locate_json_error(raw_str, error):
-    """Pinpoints line number, column, and exact character snippet where JSON parsing failed."""
+    """Pinpoints line number, column, and snippet where JSON parsing failed."""
     lines = raw_str.splitlines()
     line_no = error.lineno
     col_no = error.colno
@@ -50,26 +32,22 @@ def locate_json_error(raw_str, error):
 
 
 def generate_proof_image(results):
-    """Generates a styled PNG image summary card as downloadable proof of auditing."""
+    """Generates a styled PNG image summary card as downloadable proof."""
     total = len(results)
     syntax_errors = sum(1 for r in results if r["syntax_errors"])
     clean_pages = total - syntax_errors
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Set up canvas height dynamically based on row count
     fig, ax = plt.subplots(figsize=(10, max(4, len(results) * 0.5 + 2.5)), dpi=150)
     ax.axis('off')
 
-    # Header & Timestamp
     fig.text(0.05, 0.93, "JSON-LD Syntax Audit Proof", fontsize=18, fontweight='bold', color='#0F172A')
     fig.text(0.05, 0.88, f"Verified On: {timestamp}", fontsize=9, color='#64748B')
 
-    # KPI Banner
     banner_text = f"Total Pages: {total}  |  Syntax Errors: {syntax_errors}  |  Valid Pages: {clean_pages}"
     fig.text(0.05, 0.81, banner_text, fontsize=11, fontweight='bold', color='#1E293B',
              bbox=dict(boxstyle="round,pad=0.5", facecolor="#F1F5F9", edgecolor="#CBD5E1"))
 
-    # Table Formatting
     table_data = [["Target URL", "HTTP", "Scripts", "Syntax Errors", "Status"]]
     for r in results:
         display_url = r["url"] if len(r["url"]) < 45 else r["url"][:42] + "..."
@@ -87,7 +65,6 @@ def generate_proof_image(results):
     table.set_fontsize(9)
     table.scale(1, 1.8)
 
-    # Cell Styling & Badges
     for (row, col), cell in table.get_celld().items():
         if row == 0:
             cell.set_facecolor('#0F172A')
@@ -106,7 +83,6 @@ def generate_proof_image(results):
 
     plt.tight_layout()
 
-    # Save image to in-memory buffer
     img_buffer = io.BytesIO()
     plt.savefig(img_buffer, format='png', bbox_inches='tight', dpi=150)
     plt.close(fig)
@@ -114,8 +90,8 @@ def generate_proof_image(results):
     return img_buffer
 
 
-def inspect_page_structured_data(page, target_url):
-    """Navigates to URL, extracts JSON-LD script tags, and audits strictly for JSON syntax errors."""
+def inspect_page_structured_data(target_url):
+    """Fetches HTML via Requests, extracts JSON-LD tags with BeautifulSoup, and validates JSON syntax."""
     report = {
         "url": target_url,
         "status_code": "Unknown",
@@ -125,22 +101,21 @@ def inspect_page_structured_data(page, target_url):
         "valid_blocks": []
     }
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+
     try:
-        response = page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
-        time.sleep(1.5)
-        report["status_code"] = response.status if response else "Failed"
+        response = requests.get(target_url, headers=headers, timeout=15)
+        report["status_code"] = response.status_code
 
-        script_contents = page.evaluate("""() => {
-            const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-            return Array.from(scripts).map((s, idx) => ({
-                index: idx + 1,
-                content: s.innerHTML
-            }));
-        }""")
+        # Parse HTML using BeautifulSoup
+        soup = BeautifulSoup(response.text, "html.parser")
+        script_tags = soup.find_all("script", type="application/ld+json")
 
-        report["total_scripts"] = len(script_contents)
+        report["total_scripts"] = len(script_tags)
 
-        if len(script_contents) == 0:
+        if len(script_tags) == 0:
             report["has_errors"] = True
             report["syntax_errors"].append({
                 "block_index": 0,
@@ -148,9 +123,9 @@ def inspect_page_structured_data(page, target_url):
                 "snippet": ""
             })
 
-        for item in script_contents:
-            raw_json = item["content"].strip()
-            block_idx = item["index"]
+        for idx, tag in enumerate(script_tags, start=1):
+            raw_json = tag.string.strip() if tag.string else ""
+            block_idx = idx
 
             if not raw_json:
                 report["syntax_errors"].append({
@@ -191,7 +166,7 @@ def inspect_page_structured_data(page, target_url):
         report["has_errors"] = True
         report["syntax_errors"].append({
             "block_index": 0,
-            "error_message": f"Failed to crawl page: {str(err)}",
+            "error_message": f"Failed to fetch page: {str(err)}",
             "snippet": ""
         })
 
@@ -199,36 +174,18 @@ def inspect_page_structured_data(page, target_url):
 
 
 def run_batch_audit(urls):
-    """Executes headless Chromium scan across input URLs."""
+    """Audits input URLs sequentially using requests."""
     results = []
     progress_bar = st.progress(0)
     status_text = st.empty()
     total = len(urls)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ]
-        )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
-        )
-        page = context.new_page()
-
-        for idx, target_url in enumerate(urls):
-            status_text.text(f"Auditing JSON Syntax ({idx + 1}/{total}): {target_url}")
-            progress_bar.progress((idx + 1) / total)
-            
-            report = inspect_page_structured_data(page, target_url)
-            results.append(report)
-
-        browser.close()
+    for idx, target_url in enumerate(urls):
+        status_text.text(f"Auditing JSON Syntax ({idx + 1}/{total}): {target_url}")
+        progress_bar.progress((idx + 1) / total)
+        
+        report = inspect_page_structured_data(target_url)
+        results.append(report)
 
     status_text.empty()
     progress_bar.empty()
@@ -238,7 +195,7 @@ def run_batch_audit(urls):
 # --- Streamlit UI Layout ---
 st.set_page_config(page_title="JSON-LD Syntax Error Checker", layout="wide")
 st.title("🏷️ JSON-LD Syntax Error Checker")
-st.caption("Parses rendered page DOM via Chromium to detect broken JSON syntax, malformed tags, and parse errors.")
+st.caption("Parses page HTML source code to detect broken JSON syntax, malformed tags, and parse errors.")
 
 user_urls_input = st.text_area(
     "Paste URLs to Audit (One per line):",
@@ -280,7 +237,7 @@ if st.button("Audit JSON Syntax", type="primary"):
                 ])
                 st.dataframe(df_summary, use_container_width=True)
 
-                # --- Download Buttons (CSV + Proof Image) ---
+                # --- Download Buttons ---
                 proof_img_buf = generate_proof_image(results)
                 
                 btn_col1, btn_col2 = st.columns([1, 1])
