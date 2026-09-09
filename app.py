@@ -19,9 +19,8 @@ def init_playwright_env():
     import os
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     try:
-        # --with-deps automatically installs missing system libraries
         subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+            [sys.executable, "-m", "playwright", "install", "chromium"],
             check=True,
             capture_output=True,
             text=True
