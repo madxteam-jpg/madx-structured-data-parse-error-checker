@@ -16,22 +16,20 @@ import matplotlib.pyplot as plt
 # --- Safe Playwright Initialization ---
 @st.cache_resource
 def init_playwright_env():
-    """Ensures Playwright executables exist without blocking Streamlit startup."""
     import os
-    # Force Playwright to use standard cache directory in Streamlit Cloud
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     try:
+        # --with-deps automatically installs missing system libraries
         subprocess.run(
-            [sys.executable, "-m", "playwright", "install", "chromium"],
+            [sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
             check=True,
             capture_output=True,
             text=True
         )
     except subprocess.CalledProcessError as err:
-        st.error(f"Playwright browser installation failed: {err.stderr}")
+        st.error(f"Playwright installation failed: {err.stderr}")
 
 init_playwright_env()
-
 
 def locate_json_error(raw_str, error):
     """Pinpoints line number, column, and exact character snippet where JSON parsing failed."""
