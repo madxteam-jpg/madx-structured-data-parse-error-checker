@@ -91,8 +91,19 @@ def generate_proof_image(results):
     return img_buffer
 
 
+import subprocess
+import sys
+
+def ensure_playwright_browsers():
+    """Ensures Chromium binaries are installed in the host environment."""
+    try:
+        # Run playwright install chromium inside the running container
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        st.error(f"Failed to auto-install Playwright browser binaries: {e}")
+
+# Run the check once when the function is invoked
 def inspect_page_structured_data(target_url):
-    """Renders page via Playwright, extracts JSON-LD, and validates syntax."""
     report = {
         "url": target_url,
         "status_code": "Unknown",
@@ -101,6 +112,9 @@ def inspect_page_structured_data(target_url):
         "syntax_errors": [],
         "valid_blocks": []
     }
+
+    # Auto-download Chromium binaries if missing
+    ensure_playwright_browsers()
 
     with sync_playwright() as p:
         # Launch Chromium with anti-detection flags
@@ -114,37 +128,7 @@ def inspect_page_structured_data(target_url):
             ]
         )
         
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            viewport={"width": 1920, "height": 1080},
-            locale="en-US"
-        )
-        
-        page = context.new_page()
-        
-        # Override navigator.webdriver flag natively
-        page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-        """)
-
-        try:
-            response = page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
-            report["status_code"] = response.status if response else "Unknown"
-
-            # Allow client-side rendering & challenges 3 seconds to resolve
-            page.wait_for_timeout(3000)
-            html_content = page.content()
-
-            if response and response.status != 200:
-                report["has_errors"] = True
-                report["syntax_errors"].append({
-                    "block_index": 0,
-                    "error_message": f"HTTP Response Status {response.status} (Possible anti-bot block/challenge)",
-                    "snippet": ""
-                })
-                return report
+        # ... rest of your Playwright extraction logic ...
 
             soup = BeautifulSoup(html_content, "html.parser")
             script_tags = soup.find_all("script", type="application/ld+json")
