@@ -15,3 +15,4 @@ libgbm1
 libxkbcommon0
 libpango-1.0-0
 libcairo2
+libdrm2
