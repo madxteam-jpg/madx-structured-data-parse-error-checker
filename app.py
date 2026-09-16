@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 def ensure_playwright_browsers():
     """Installs required Playwright Chromium binaries on app startup."""
     try:
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"], check=True)
     except Exception as e:
         st.error(f"Failed to auto-install Playwright Chromium binary: {e}")
 
