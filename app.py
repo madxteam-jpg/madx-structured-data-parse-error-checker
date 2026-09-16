@@ -137,7 +137,6 @@ def generate_proof_image(results):
 
 
 from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 
 def inspect_page_structured_data_playwright(target_url):
     report = {
@@ -150,25 +149,46 @@ def inspect_page_structured_data_playwright(target_url):
     }
     
     with sync_playwright() as p:
-        # Launch real Chromium browser in headless mode
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        # Launch Chromium with anti-detection flags
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars"
+            ]
         )
+        
+        # Create context spoofing a real desktop browser
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US"
+        )
+        
         page = context.new_page()
-        stealth_sync(page)  # Applies anti-bot detection evasions
+        
+        # Override navigator.webdriver flag natively
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
 
         try:
-            response = page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            response = page.goto(target_url, wait_until="networkidle", timeout=30000)
             report["status_code"] = response.status if response else "Unknown"
 
-            # Allow potential JS/Cloudflare challenges 3-5 seconds to resolve automatically
-            page.wait_for_timeout(4000)
+            # Wait briefly for potential JS rendering / challenges
+            page.wait_for_timeout(3000)
             html_content = page.content()
 
-            # Process HTML content with BeautifulSoup as normal...
+            # Process HTML content with BeautifulSoup
             soup = BeautifulSoup(html_content, "html.parser")
-            # [Insert script tag extraction logic here]
+            script_tags = soup.find_all("script", type="application/ld+json")
+            
+            # ... [keep your JSON processing logic here] ...
 
         except Exception as err:
             report["has_errors"] = True
