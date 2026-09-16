@@ -4,58 +4,13 @@ import random
 import time
 from datetime import datetime
 import pandas as pd
-import bs4
 from bs4 import BeautifulSoup
 import streamlit as st
-from curl_cffi import requests
+from playwright.sync_api import sync_playwright
 
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
-
-
-def get_stealth_request_config():
-    """
-    Generates realistic browser headers matching curl_cffi target impersonation.
-    """
-    browser_profiles = [
-        {
-            "target": "chrome",
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'
-        },
-        {
-            "target": "chrome",
-            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "sec_ch_ua": '"Chromium";v="123", "Google Chrome";v="123", "Not-A.Brand";v="99"'
-        },
-        {
-            "target": "safari",
-            "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
-            "sec_ch_ua": None
-        }
-    ]
-
-    profile = random.choice(browser_profiles)
-
-    headers = {
-        "User-Agent": profile["user_agent"],
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "cross-site",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1"
-    }
-
-    if profile["sec_ch_ua"]:
-        headers["Sec-Ch-Ua"] = profile["sec_ch_ua"]
-        headers["Sec-Ch-Ua-Mobile"] = "?0"
-        headers["Sec-Ch-Ua-Platform"] = '"Windows"'
-
-    return profile["target"], headers
 
 
 def locate_json_error(raw_str, error):
@@ -136,9 +91,8 @@ def generate_proof_image(results):
     return img_buffer
 
 
-from playwright.sync_api import sync_playwright
-
-def inspect_page_structured_data_playwright(target_url):
+def inspect_page_structured_data(target_url):
+    """Renders page via Playwright, extracts JSON-LD, and validates syntax."""
     report = {
         "url": target_url,
         "status_code": "Unknown",
@@ -147,7 +101,7 @@ def inspect_page_structured_data_playwright(target_url):
         "syntax_errors": [],
         "valid_blocks": []
     }
-    
+
     with sync_playwright() as p:
         # Launch Chromium with anti-detection flags
         browser = p.chromium.launch(
@@ -160,7 +114,6 @@ def inspect_page_structured_data_playwright(target_url):
             ]
         )
         
-        # Create context spoofing a real desktop browser
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             viewport={"width": 1920, "height": 1080},
@@ -177,24 +130,82 @@ def inspect_page_structured_data_playwright(target_url):
         """)
 
         try:
-            response = page.goto(target_url, wait_until="networkidle", timeout=30000)
+            response = page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             report["status_code"] = response.status if response else "Unknown"
 
-            # Wait briefly for potential JS rendering / challenges
+            # Allow client-side rendering & challenges 3 seconds to resolve
             page.wait_for_timeout(3000)
             html_content = page.content()
 
-            # Process HTML content with BeautifulSoup
+            if response and response.status != 200:
+                report["has_errors"] = True
+                report["syntax_errors"].append({
+                    "block_index": 0,
+                    "error_message": f"HTTP Response Status {response.status} (Possible anti-bot block/challenge)",
+                    "snippet": ""
+                })
+                return report
+
             soup = BeautifulSoup(html_content, "html.parser")
             script_tags = soup.find_all("script", type="application/ld+json")
-            
-            # ... [keep your JSON processing logic here] ...
+            report["total_scripts"] = len(script_tags)
+
+            if len(script_tags) == 0:
+                report["has_errors"] = True
+                report["syntax_errors"].append({
+                    "block_index": 0,
+                    "error_message": "No <script type='application/ld+json'> tags found on this page.",
+                    "snippet": ""
+                })
+
+            for idx, tag in enumerate(script_tags, start=1):
+                raw_json = tag.string.strip() if tag.string else ""
+                
+                if not raw_json and isinstance(tag.contents, list) and len(tag.contents) > 0:
+                    raw_json = "".join([str(c) for c in tag.contents]).strip()
+
+                block_idx = idx
+
+                if not raw_json:
+                    report["syntax_errors"].append({
+                        "block_index": block_idx,
+                        "error_message": "Empty JSON-LD script tag found.",
+                        "snippet": ""
+                    })
+                    report["has_errors"] = True
+                    continue
+
+                try:
+                    parsed_data = json.loads(raw_json)
+                    
+                    schema_type = "Unknown"
+                    if isinstance(parsed_data, dict):
+                        schema_type = parsed_data.get("@type", "Object/@graph")
+                    elif isinstance(parsed_data, list):
+                        schema_type = f"Array[{len(parsed_data)} items]"
+
+                    report["valid_blocks"].append({
+                        "block_index": block_idx,
+                        "type": schema_type,
+                        "data": parsed_data
+                    })
+
+                except json.JSONDecodeError as err:
+                    report["has_errors"] = True
+                    snippet = locate_json_error(raw_json, err)
+                    report["syntax_errors"].append({
+                        "block_index": block_idx,
+                        "error_message": f"{err.msg} (Line {err.lineno}, Col {err.colno})",
+                        "snippet": snippet,
+                        "raw": raw_json[:300] + "..." if len(raw_json) > 300 else raw_json
+                    })
 
         except Exception as err:
+            report["status_code"] = f"Error: {type(err).__name__}"
             report["has_errors"] = True
             report["syntax_errors"].append({
                 "block_index": 0,
-                "error_message": f"Browser load error: {str(err)}",
+                "error_message": f"Failed to fetch page: {str(err)}",
                 "snippet": ""
             })
         finally:
@@ -204,7 +215,7 @@ def inspect_page_structured_data_playwright(target_url):
 
 
 def run_batch_audit(urls):
-    """Audits input URLs sequentially with randomized delays."""
+    """Audits input URLs sequentially using Playwright."""
     results = []
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -214,12 +225,12 @@ def run_batch_audit(urls):
         status_text.text(f"Auditing JSON Syntax ({idx + 1}/{total}): {target_url}")
         progress_bar.progress((idx + 1) / total)
         
+        # Function call matches defined name
         report = inspect_page_structured_data(target_url)
         results.append(report)
 
-        # Apply random delay between 1.5 - 3.5s (Skip delay on final request)
         if idx < total - 1:
-            time.sleep(random.uniform(1.5, 3.5))
+            time.sleep(random.uniform(1.0, 2.5))
 
     status_text.empty()
     progress_bar.empty()
@@ -228,8 +239,8 @@ def run_batch_audit(urls):
 
 # --- Streamlit UI Layout ---
 st.set_page_config(page_title="JSON-LD Syntax Error Checker", layout="wide")
-st.title("🏷️ Anti-Bot Resilient JSON-LD Syntax Checker")
-st.caption("Parses page source HTML with spoofed browser TLS profiles (`curl_cffi`) to bypass bot filters and audit structured data.")
+st.title("🏷️ Playwright-Powered JSON-LD Syntax Checker")
+st.caption("Renders pages in a headless Chromium browser to execute client JS, bypass anti-bot blocks, and validate structured data.")
 
 user_urls_input = st.text_area(
     "Paste URLs to Audit (One per line):",
@@ -243,7 +254,7 @@ if st.button("Audit JSON Syntax", type="primary"):
     if not urls:
         st.error("Please enter at least one URL to check.")
     else:
-        with st.spinner("Bypassing detection & extracting JSON-LD syntax..."):
+        with st.spinner("Rendering browser pages & validating JSON-LD..."):
             try:
                 results = run_batch_audit(urls)
 
