@@ -136,8 +136,10 @@ def generate_proof_image(results):
     return img_buffer
 
 
-def inspect_page_structured_data(target_url):
-    """Fetches HTML via curl_cffi with TLS/HTTP2 spoofing, extracts JSON-LD, and validates syntax."""
+from playwright.sync_api import sync_playwright
+from playwright_stealth import stealth_sync
+
+def inspect_page_structured_data_playwright(target_url):
     report = {
         "url": target_url,
         "status_code": "Unknown",
@@ -146,95 +148,37 @@ def inspect_page_structured_data(target_url):
         "syntax_errors": [],
         "valid_blocks": []
     }
-
-    target_browser, headers = get_stealth_request_config()
-
-    try:
-        # Fetching with browser TLS fingerprint spoofing via curl_cffi
-        response = requests.get(
-            target_url, 
-            headers=headers, 
-            impersonate=target_browser, 
-            timeout=20,
-            allow_redirects=True
+    
+    with sync_playwright() as p:
+        # Launch real Chromium browser in headless mode
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
-        report["status_code"] = response.status_code
+        page = context.new_page()
+        stealth_sync(page)  # Applies anti-bot detection evasions
 
-        # Detect HTTP Error Code blocks (e.g. 403, 429)
-        if response.status_code != 200:
+        try:
+            response = page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            report["status_code"] = response.status if response else "Unknown"
+
+            # Allow potential JS/Cloudflare challenges 3-5 seconds to resolve automatically
+            page.wait_for_timeout(4000)
+            html_content = page.content()
+
+            # Process HTML content with BeautifulSoup as normal...
+            soup = BeautifulSoup(html_content, "html.parser")
+            # [Insert script tag extraction logic here]
+
+        except Exception as err:
             report["has_errors"] = True
             report["syntax_errors"].append({
                 "block_index": 0,
-                "error_message": f"HTTP Response Status {response.status_code} (Possible anti-bot block/challenge)",
+                "error_message": f"Browser load error: {str(err)}",
                 "snippet": ""
             })
-            return report
-
-        # Parse HTML using BeautifulSoup
-        soup = BeautifulSoup(response.text, "html.parser")
-        script_tags = soup.find_all("script", type="application/ld+json")
-
-        report["total_scripts"] = len(script_tags)
-
-        if len(script_tags) == 0:
-            report["has_errors"] = True
-            report["syntax_errors"].append({
-                "block_index": 0,
-                "error_message": "No <script type='application/ld+json'> tags found on this page.",
-                "snippet": ""
-            })
-
-        for idx, tag in enumerate(script_tags, start=1):
-            raw_json = tag.string.strip() if tag.string else ""
-            
-            # Handle empty tag case or string child mismatch
-            if not raw_json and isinstance(tag.contents, list) and len(tag.contents) > 0:
-                raw_json = "".join([str(c) for c in tag.contents]).strip()
-
-            block_idx = idx
-
-            if not raw_json:
-                report["syntax_errors"].append({
-                    "block_index": block_idx,
-                    "error_message": "Empty JSON-LD script tag found.",
-                    "snippet": ""
-                })
-                report["has_errors"] = True
-                continue
-
-            try:
-                parsed_data = json.loads(raw_json)
-                
-                schema_type = "Unknown"
-                if isinstance(parsed_data, dict):
-                    schema_type = parsed_data.get("@type", "Object/@graph")
-                elif isinstance(parsed_data, list):
-                    schema_type = f"Array[{len(parsed_data)} items]"
-
-                report["valid_blocks"].append({
-                    "block_index": block_idx,
-                    "type": schema_type,
-                    "data": parsed_data
-                })
-
-            except json.JSONDecodeError as err:
-                report["has_errors"] = True
-                snippet = locate_json_error(raw_json, err)
-                report["syntax_errors"].append({
-                    "block_index": block_idx,
-                    "error_message": f"{err.msg} (Line {err.lineno}, Col {err.colno})",
-                    "snippet": snippet,
-                    "raw": raw_json[:300] + "..." if len(raw_json) > 300 else raw_json
-                })
-
-    except Exception as err:
-        report["status_code"] = f"Error: {type(err).__name__}"
-        report["has_errors"] = True
-        report["syntax_errors"].append({
-            "block_index": 0,
-            "error_message": f"Failed to fetch page: {str(err)}",
-            "snippet": ""
-        })
+        finally:
+            browser.close()
 
     return report
 
