@@ -3,3 +3,5 @@ curl-cffi
 beautifulsoup4
 pandas
 matplotlib
+playwright
+playwright-stealth
