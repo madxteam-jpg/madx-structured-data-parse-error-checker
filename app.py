@@ -1,6 +1,8 @@
 import io
 import json
 import random
+import subprocess
+import sys
 import time
 from datetime import datetime
 import pandas as pd
@@ -11,6 +13,15 @@ from playwright.sync_api import sync_playwright
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
+
+
+@st.cache_resource
+def ensure_playwright_browsers():
+    """Installs required Playwright Chromium binaries on app startup."""
+    try:
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        st.error(f"Failed to auto-install Playwright Chromium binary: {e}")
 
 
 def locate_json_error(raw_str, error):
@@ -91,19 +102,8 @@ def generate_proof_image(results):
     return img_buffer
 
 
-import subprocess
-import sys
-
-def ensure_playwright_browsers():
-    """Ensures Chromium binaries are installed in the host environment."""
-    try:
-        # Run playwright install chromium inside the running container
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-    except Exception as e:
-        st.error(f"Failed to auto-install Playwright browser binaries: {e}")
-
-# Run the check once when the function is invoked
 def inspect_page_structured_data(target_url):
+    """Renders page via Playwright, extracts JSON-LD, and validates syntax."""
     report = {
         "url": target_url,
         "status_code": "Unknown",
@@ -113,7 +113,7 @@ def inspect_page_structured_data(target_url):
         "valid_blocks": []
     }
 
-    # Auto-download Chromium binaries if missing
+    # Ensure Chromium binaries exist
     ensure_playwright_browsers()
 
     with sync_playwright() as p:
@@ -128,7 +128,37 @@ def inspect_page_structured_data(target_url):
             ]
         )
         
-        # ... rest of your Playwright extraction logic ...
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US"
+        )
+        
+        page = context.new_page()
+        
+        # Override navigator.webdriver flag natively
+        page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
+
+        try:
+            response = page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            report["status_code"] = response.status if response else "Unknown"
+
+            # Allow client-side rendering & challenges 3 seconds to resolve
+            page.wait_for_timeout(3000)
+            html_content = page.content()
+
+            if response and response.status != 200:
+                report["has_errors"] = True
+                report["syntax_errors"].append({
+                    "block_index": 0,
+                    "error_message": f"HTTP Response Status {response.status} (Possible anti-bot block/challenge)",
+                    "snippet": ""
+                })
+                return report
 
             soup = BeautifulSoup(html_content, "html.parser")
             script_tags = soup.find_all("script", type="application/ld+json")
@@ -209,7 +239,6 @@ def run_batch_audit(urls):
         status_text.text(f"Auditing JSON Syntax ({idx + 1}/{total}): {target_url}")
         progress_bar.progress((idx + 1) / total)
         
-        # Function call matches defined name
         report = inspect_page_structured_data(target_url)
         results.append(report)
 
